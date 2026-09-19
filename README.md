@@ -5,23 +5,69 @@ Okou app for the [Even Realities G2](https://hub.evenrealities.com/) glasses.
 Live at **https://g2.okou.ai** — a Cloudflare Worker that serves the SPA and
 verifies Clerk sessions.
 
-## Status: Phase 1 — authentication probe
+## What it does
 
-The goal of this phase is to prove that a Clerk email-code session created
-inside the Even App WebView survives real-world conditions, before any chat
-code is written. The app signs you in, then calls `/api/auth/me` and shows the
-Clerk user ID the Worker independently verified.
+Signs you in with a Clerk email code, then keeps your Okou chat list on the
+device and on the glasses:
 
-Chat against a fixed Okou thread comes in Phase 2.
+- **Thread list** — full snapshot plus the lifecycle event tail.
+- **Chat events** — durable rows for the most recently active threads.
+- **Push updates** — an Ably subscription invalidates either sync as soon as
+  the server publishes.
+
+Streaming output is deliberately not handled. Partial assistant text travels on
+a separate `run-output` channel; this client only stores committed rows, so a
+turn appears once it is durable.
+
+Sending messages from the glasses is not implemented yet.
 
 ## Architecture
 
 ```
 Even G2  ──BLE──  Even App WebView  ──HTTPS──  g2.okou.ai (Cloudflare Worker)
-                         │                             │
                          │                             └── verifies Clerk JWT
-                         └── clerk.okou.ai (email code sign-in)
+                         ├── clerk.okou.ai    (email code sign-in)
+                         ├── api.okou.ai      (threads, chat events, Ably token)
+                         ├── *.ably.net       (push invalidation)
+                         └── Even App storage (durable cache)
 ```
+
+### Sync protocol
+
+Both loops mirror the platform SharedWorker:
+
+| | Cold start | Tail | Cursor expired |
+| --- | --- | --- | --- |
+| Threads | `GET /api/chat-threads/snapshot` | `GET /api/chat-threads/events?sinceSeqId=` | `410` → snapshot |
+| Messages | `GET /api/chat-threads/:id/event-snapshot` | `GET /api/chat-threads/:id/event-rows?sinceSeqId=` | `410` → snapshot |
+
+Push topics on `user-org:<userId>:<orgId>`:
+
+- `threadListChanged` → resync the list
+- `chatThreadMessageCreated:<threadId>` → resync that thread
+
+Payloads are notifications, not data. Every delivery triggers a fetch, because
+the server stays authoritative.
+
+### Storage
+
+The Even App's `setLocalStorage` / `getLocalStorage` is a flat string store
+with **no key enumeration, no delete, and no documented size limit**. So:
+
+- Keys are namespaced `okou/v1/<clerkUserId>/<orgId>/…`, which is also what
+  keeps two identities from mixing.
+- Values are chunked into `<key>#<n>` with a header recording the count.
+- Removal writes a tombstone; the key stays allocated but reads as absent.
+- The namespace keeps its own thread index, since nothing can list keys.
+
+Bounds live in `src/config.ts`: 200 threads listed, messages kept for the 20
+most recently active, 200 rows each.
+
+### Organization
+
+Every Okou chat API resolves its organization from the session token's
+`org_id`. A sign-in does not set one by itself, so `OrganizationGate` selects
+the only membership automatically and shows a picker when there are several.
 
 - The app code runs on the phone, not on the glasses. G2 renders text and
   forwards touch/IMU input.
@@ -98,7 +144,16 @@ Note that a packaged build runs from a WebView origin Even Realities does not
 publish, which Clerk has not been verified to accept. Loading `https://g2.okou.ai`
 by URL keeps the origin stable and is the supported path until that is tested.
 
-## Phase 1 acceptance checklist
+## Tests
+
+```bash
+npm test
+```
+
+Covers the storage layer's chunking, tombstone and torn-write behaviour, and
+the thread sync state machine including cursor expiry and pagination.
+
+## Acceptance checklist
 
 - [ ] Email code arrives and verifies on iOS
 - [ ] Email code arrives and verifies on Android
@@ -107,3 +162,8 @@ by URL keeps the origin stable and is the supported path until that is tested.
 - [ ] Token still refreshes after 5 minutes backgrounded or screen-locked
 - [ ] Session still restores after 24 hours
 - [ ] Signing out invalidates the old token
+- [ ] Chat list appears on the lens after sign-in
+- [ ] A new message in app.okou.ai reaches the glasses without a manual sync
+- [ ] The list survives force-quitting and reopening the Even App
+- [ ] The list survives an Android background suspend, and the Ably connection
+      recovers on resume

@@ -2,14 +2,31 @@
   "package_id": "ai.okou.g2",
   "edition": "202601",
   "name": "Okou",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "min_sdk_version": "0.0.15",
   "entrypoint": "index.html",
   "permissions": [
     {
       "name": "network",
-      "desc": "Signs you in to your Okou account and syncs your Okou conversation.",
-      "whitelist": ["https://g2.okou.ai", "https://clerk.okou.ai"]
+      "desc": "Signs you in to your Okou account and keeps your chat list in sync.",
+      "whitelist": [
+        "https://g2.okou.ai",
+        "https://clerk.okou.ai",
+        "https://api.okou.ai",
+        "https://98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com",
+        "https://main.realtime.ably.net",
+        "wss://main.realtime.ably.net",
+        "https://main.a.fallback.ably-realtime.com",
+        "wss://main.a.fallback.ably-realtime.com",
+        "https://main.b.fallback.ably-realtime.com",
+        "wss://main.b.fallback.ably-realtime.com",
+        "https://main.c.fallback.ably-realtime.com",
+        "wss://main.c.fallback.ably-realtime.com",
+        "https://main.d.fallback.ably-realtime.com",
+        "wss://main.d.fallback.ably-realtime.com",
+        "https://main.e.fallback.ably-realtime.com",
+        "wss://main.e.fallback.ably-realtime.com"
+      ]
     }
   ],
   "supported_languages": ["en", "zh"]

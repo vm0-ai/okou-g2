@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { SignedIn, SignedOut, useAuth, useUser } from '@clerk/clerk-react'
+import { SignedIn, SignedOut, useAuth, useOrganization, useUser } from '@clerk/clerk-react'
 import type { EvenAppBridge } from '@evenrealities/even_hub_sdk'
 
+import ChatSyncPanel from './ChatSyncPanel'
+import OrganizationGate from './OrganizationGate'
 import SignInCard from './SignInCard'
+import { useChatSync } from './useChatSync'
+import type { SyncState } from './sync/engine'
+import type { ChatThread } from './types'
 import {
   connectBridge,
   createStatusPage,
@@ -92,32 +97,49 @@ function AccountPanel({ probe, onRecheck }: { probe: ProbeState; onRecheck: () =
   )
 }
 
-/** What the lens shows, at most four short lines. */
+function threadLine(thread: ChatThread): string {
+  return thread.title ?? 'Untitled'
+}
+
+/**
+ * What the lens shows, at most four short lines.
+ *
+ * Once chats are synced the lens becomes the chat list, because that is the
+ * thing worth glancing at. Auth and sync problems take priority over it, since
+ * a stale list with no explanation is worse than no list.
+ */
 function lensText(
   isLoaded: boolean,
   isSignedIn: boolean | undefined,
   email: string | undefined,
   probe: ProbeState,
+  sync: SyncState,
 ): string {
   if (!isLoaded) return 'Okou\nStarting...'
   if (!isSignedIn) return 'Okou\nSign in on your phone'
 
   const who = email ?? 'signed in'
-  switch (probe.status) {
-    case 'ok':
-      return `Okou\n${who}\nBackend verified\nTap re-check / 2x-tap exit`
-    case 'loading':
-      return `Okou\n${who}\nChecking...`
-    case 'error':
-      return `Okou\n${who}\nCheck failed\n${probe.message}`
-    default:
-      return `Okou\n${who}`
+  if (probe.status === 'error') return `Okou\n${who}\nCheck failed\n${probe.message}`
+  if (sync.error) return `Okou\n${who}\nSync failed\n${sync.error}`
+
+  if (sync.threads.length > 0) {
+    const top = [...sync.threads]
+      .sort((left, right) => right.sortAt.localeCompare(left.sortAt))
+      .slice(0, 3)
+      .map(threadLine)
+    return ['Okou', ...top].join('\n')
   }
+
+  if (sync.syncing) return `Okou\n${who}\nSyncing chats...`
+  if (probe.status === 'ok') return `Okou\n${who}\nBackend verified`
+  return `Okou\n${who}`
 }
 
 export default function App() {
   const { isLoaded, isSignedIn, getToken } = useAuth()
   const { user } = useUser()
+  const { organization } = useOrganization()
+  const sync = useChatSync(organization?.id)
   const [glasses, setGlasses] = useState<GlassesState>(initialGlassesState)
   const [probe, setProbe] = useState<ProbeState>({ status: 'idle' })
   const bridgeRef = useRef<EvenAppBridge | null>(null)
@@ -155,10 +177,13 @@ export default function App() {
   }, [isLoaded, isSignedIn, runProbe])
 
   // Attach to the Even App bridge once, then mirror device status and temple
-  // input into React. `runProbeRef` keeps the input subscription stable while
-  // still calling the current probe.
-  const runProbeRef = useRef(runProbe)
-  runProbeRef.current = runProbe
+  // input into React. The ref keeps the input subscription stable while still
+  // calling the current handler.
+  const onTapRef = useRef<() => void>(() => {})
+  onTapRef.current = () => {
+    void runProbe()
+    sync.resync()
+  }
 
   useEffect(() => {
     let disposed = false
@@ -186,7 +211,7 @@ export default function App() {
       )
       cleanups.push(
         onStatusPageInput(bridge, {
-          onTap: () => void runProbeRef.current(),
+          onTap: () => onTapRef.current(),
           onDoubleTap: () => void exitApp(bridge),
         }),
       )
@@ -200,7 +225,13 @@ export default function App() {
 
   // Keep the lens showing the current auth state. The startup page is created
   // once, then updated in place.
-  const text = lensText(isLoaded, isSignedIn, user?.primaryEmailAddress?.emailAddress, probe)
+  const text = lensText(
+    isLoaded,
+    isSignedIn,
+    user?.primaryEmailAddress?.emailAddress,
+    probe,
+    sync.state,
+  )
 
   useEffect(() => {
     const bridge = bridgeRef.current
@@ -238,7 +269,7 @@ export default function App() {
     <main>
       <header>
         <h1>Okou for Even G2</h1>
-        <p className="hint">Phase 1 — authentication probe</p>
+        <p className="hint">Chat list synced to your glasses</p>
       </header>
 
       {!isLoaded ? (
@@ -252,6 +283,11 @@ export default function App() {
           </SignedOut>
           <SignedIn>
             <AccountPanel probe={probe} onRecheck={() => void runProbe()} />
+            <OrganizationGate>
+              {(orgId) => (
+                <ChatSyncPanel orgId={orgId} state={sync.state} onResync={sync.resync} />
+              )}
+            </OrganizationGate>
           </SignedIn>
         </>
       )}
