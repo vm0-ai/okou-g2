@@ -166,10 +166,11 @@ export default function App() {
         if (!glasses.pageReady) {
           const created = await createStatusPage(bridge, lensText)
           if (disposed) return
-          setGlasses((previous) => ({ ...previous, pageReady: created, error: undefined }))
-          if (!created) {
-            setGlasses((previous) => ({ ...previous, error: 'Could not create the G2 page.' }))
-          }
+          setGlasses((previous) => ({
+            ...previous,
+            pageReady: created,
+            error: created ? undefined : 'Could not create the G2 page.',
+          }))
           return
         }
         await updateStatusText(bridge, lensText)
