@@ -2,13 +2,13 @@
   "package_id": "ai.okou.g2",
   "edition": "202601",
   "name": "Okou",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "min_sdk_version": "0.0.15",
   "entrypoint": "index.html",
   "permissions": [
     {
       "name": "network",
-      "desc": "Signs you in to your Okou account and keeps your chat list in sync.",
+      "desc": "Signs you in to your Okou account, syncs your chats, and sends what you say.",
       "whitelist": [
         "https://g2.okou.ai",
         "https://clerk.okou.ai",
@@ -28,7 +28,14 @@
         "https://main.e.fallback.ably-realtime.com",
         "wss://main.e.fallback.ably-realtime.com"
       ]
+    },
+    {
+      "name": "g2-microphone",
+      "desc": "Lets you dictate a chat message with the glasses microphone."
     }
   ],
-  "supported_languages": ["en", "zh"]
+  "supported_languages": [
+    "en",
+    "zh"
+  ]
 }

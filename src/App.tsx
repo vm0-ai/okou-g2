@@ -1,24 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { SignedIn, SignedOut, useAuth, useOrganization, useUser } from '@clerk/clerk-react'
-import type { EvenAppBridge } from '@evenrealities/even_hub_sdk'
 
 import ChatSyncPanel from './ChatSyncPanel'
 import OrganizationGate from './OrganizationGate'
 import SignInCard from './SignInCard'
 import { useChatSync } from './useChatSync'
-import type { SyncState } from './sync/engine'
-import type { ChatThread } from './types'
-import {
-  connectBridge,
-  createStatusPage,
-  describeConnection,
-  exitApp,
-  initialGlassesState,
-  onDeviceStatus,
-  onStatusPageInput,
-  updateStatusText,
-  type GlassesState,
-} from './glasses'
+import { useLens } from './useLens'
+import { describeConnection, type GlassesState } from './glasses'
+import type { LensScreen } from './lens/controller'
 
 interface AuthProbe {
   userId: string
@@ -34,7 +23,21 @@ type ProbeState =
   | { status: 'ok'; data: AuthProbe }
   | { status: 'error'; message: string }
 
-function GlassesPanel({ state }: { state: GlassesState }) {
+const SCREEN_HELP: Record<LensScreen, string> = {
+  threads: 'Scroll to a chat, tap to open. Double-tap exits.',
+  messages: 'Tap to reply by voice. Double-tap goes back.',
+  compose: 'Tap to start and stop speaking. Double-tap cancels.',
+}
+
+function GlassesPanel({
+  state,
+  screen,
+  threadId,
+}: {
+  state: GlassesState
+  screen: LensScreen
+  threadId: string | null
+}) {
   return (
     <section className="card">
       <h2>Glasses</h2>
@@ -43,16 +46,21 @@ function GlassesPanel({ state }: { state: GlassesState }) {
         <dd>{state.phase}</dd>
         <dt>Device</dt>
         <dd>{describeConnection(state)}</dd>
-        <dt>Display</dt>
-        <dd>{state.pageReady ? 'status page active' : 'idle'}</dd>
+        <dt>Screen</dt>
+        <dd>{state.pageReady ? screen : 'idle'}</dd>
+        {threadId ? (
+          <>
+            <dt>Open thread</dt>
+            <dd className="mono">{threadId}</dd>
+          </>
+        ) : null}
       </dl>
       {state.error ? <p className="error">{state.error}</p> : null}
-      {state.phase === 'ready' ? (
-        <p className="hint">Tap a temple to re-check. Double-tap to exit.</p>
-      ) : null}
+      {state.phase === 'ready' ? <p className="hint">{SCREEN_HELP[screen]}</p> : null}
       {state.phase === 'unavailable' ? (
         <p className="hint">
-          Open this page from the Even App to drive the G2 display. Sign-in works in any browser.
+          Open this page from the Even App to drive the G2 display. Sign-in and sync work in any
+          browser.
         </p>
       ) : null}
     </section>
@@ -73,18 +81,12 @@ function AccountPanel({ probe, onRecheck }: { probe: ProbeState; onRecheck: () =
         <dd className="mono">{user?.id ?? '—'}</dd>
       </dl>
 
-      <h3>Backend check</h3>
       {probe.status === 'loading' ? <p className="hint">Verifying…</p> : null}
       {probe.status === 'error' ? <p className="error">{probe.message}</p> : null}
       {probe.status === 'ok' ? (
-        <dl>
-          <dt>Verified user</dt>
-          <dd className="mono">{probe.data.userId}</dd>
-          <dt>Session</dt>
-          <dd className="mono">{probe.data.sessionId ?? '—'}</dd>
-          <dt>Fixed thread</dt>
-          <dd>{probe.data.threadBound ? 'bound' : 'not bound yet'}</dd>
-        </dl>
+        <p className="hint">
+          Backend verified as <span className="mono">{probe.data.userId}</span>
+        </p>
       ) : null}
 
       <button type="button" onClick={onRecheck} disabled={probe.status === 'loading'}>
@@ -97,52 +99,12 @@ function AccountPanel({ probe, onRecheck }: { probe: ProbeState; onRecheck: () =
   )
 }
 
-function threadLine(thread: ChatThread): string {
-  return thread.title ?? 'Untitled'
-}
-
-/**
- * What the lens shows, at most four short lines.
- *
- * Once chats are synced the lens becomes the chat list, because that is the
- * thing worth glancing at. Auth and sync problems take priority over it, since
- * a stale list with no explanation is worse than no list.
- */
-function lensText(
-  isLoaded: boolean,
-  isSignedIn: boolean | undefined,
-  email: string | undefined,
-  probe: ProbeState,
-  sync: SyncState,
-): string {
-  if (!isLoaded) return 'Okou\nStarting...'
-  if (!isSignedIn) return 'Okou\nSign in on your phone'
-
-  const who = email ?? 'signed in'
-  if (probe.status === 'error') return `Okou\n${who}\nCheck failed\n${probe.message}`
-  if (sync.error) return `Okou\n${who}\nSync failed\n${sync.error}`
-
-  if (sync.threads.length > 0) {
-    const top = [...sync.threads]
-      .sort((left, right) => right.sortAt.localeCompare(left.sortAt))
-      .slice(0, 3)
-      .map(threadLine)
-    return ['Okou', ...top].join('\n')
-  }
-
-  if (sync.syncing) return `Okou\n${who}\nSyncing chats...`
-  if (probe.status === 'ok') return `Okou\n${who}\nBackend verified`
-  return `Okou\n${who}`
-}
-
 export default function App() {
   const { isLoaded, isSignedIn, getToken } = useAuth()
-  const { user } = useUser()
   const { organization } = useOrganization()
   const sync = useChatSync(organization?.id)
-  const [glasses, setGlasses] = useState<GlassesState>(initialGlassesState)
+  const lens = useLens(sync.engine, sync.state)
   const [probe, setProbe] = useState<ProbeState>({ status: 'idle' })
-  const bridgeRef = useRef<EvenAppBridge | null>(null)
 
   const runProbe = useCallback(async () => {
     setProbe({ status: 'loading' })
@@ -176,95 +138,6 @@ export default function App() {
     void runProbe()
   }, [isLoaded, isSignedIn, runProbe])
 
-  // Attach to the Even App bridge once, then mirror device status and temple
-  // input into React. The ref keeps the input subscription stable while still
-  // calling the current handler.
-  const onTapRef = useRef<() => void>(() => {})
-  onTapRef.current = () => {
-    void runProbe()
-    sync.resync()
-  }
-
-  useEffect(() => {
-    let disposed = false
-    const cleanups: (() => void)[] = []
-
-    void (async () => {
-      const bridge = await connectBridge()
-      if (disposed) return
-      if (!bridge) {
-        setGlasses((previous) => ({ ...previous, phase: 'unavailable' }))
-        return
-      }
-      bridgeRef.current = bridge
-      setGlasses((previous) => ({ ...previous, phase: 'ready' }))
-
-      cleanups.push(
-        onDeviceStatus(bridge, (status) => {
-          setGlasses((previous) => ({
-            ...previous,
-            connectType: status.connectType,
-            batteryLevel: status.batteryLevel,
-            isWearing: status.isWearing,
-          }))
-        }),
-      )
-      cleanups.push(
-        onStatusPageInput(bridge, {
-          onTap: () => onTapRef.current(),
-          onDoubleTap: () => void exitApp(bridge),
-        }),
-      )
-    })()
-
-    return () => {
-      disposed = true
-      for (const cleanup of cleanups) cleanup()
-    }
-  }, [])
-
-  // Keep the lens showing the current auth state. The startup page is created
-  // once, then updated in place.
-  const text = lensText(
-    isLoaded,
-    isSignedIn,
-    user?.primaryEmailAddress?.emailAddress,
-    probe,
-    sync.state,
-  )
-
-  useEffect(() => {
-    const bridge = bridgeRef.current
-    if (glasses.phase !== 'ready' || !bridge) return
-    let disposed = false
-
-    void (async () => {
-      try {
-        if (!glasses.pageReady) {
-          const created = await createStatusPage(bridge, text)
-          if (disposed) return
-          setGlasses((previous) => ({
-            ...previous,
-            pageReady: created,
-            error: created ? undefined : 'Could not create the G2 page.',
-          }))
-          return
-        }
-        await updateStatusText(bridge, text)
-      } catch (caught) {
-        if (disposed) return
-        setGlasses((previous) => ({
-          ...previous,
-          error: caught instanceof Error ? caught.message : 'Glasses update failed',
-        }))
-      }
-    })()
-
-    return () => {
-      disposed = true
-    }
-  }, [glasses.phase, glasses.pageReady, text])
-
   return (
     <main>
       <header>
@@ -292,7 +165,7 @@ export default function App() {
         </>
       )}
 
-      <GlassesPanel state={glasses} />
+      <GlassesPanel state={lens.glasses} screen={lens.screen} threadId={lens.threadId} />
     </main>
   )
 }

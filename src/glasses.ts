@@ -1,34 +1,17 @@
 /**
- * Thin optional wrapper around the Even Hub SDK.
+ * Bridge discovery and device status.
  *
  * The same build has to run in three places: the Even App WebView on a phone
  * paired with G2, a plain desktop browser during development, and the Even Hub
- * simulator. Everything here degrades to a no-op when no bridge is present, so
- * the auth flow stays testable without the glasses.
+ * simulator. This module answers "is there a host at all" so everything above
+ * it can degrade cleanly. Screen rendering and input live in `src/lens/`.
  */
 import {
-  CreateStartUpPageContainer,
   DeviceConnectType,
-  OsEventTypeList,
-  StartUpPageCreateResult,
-  TextContainerProperty,
-  TextContainerUpgrade,
   waitForEvenAppBridge,
   type DeviceStatus,
   type EvenAppBridge,
-  type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
-
-/** Logical drawing surface of one G2 lens, in container coordinates. */
-const LENS_WIDTH = 576
-const LENS_HEIGHT = 288
-
-const STATUS_CONTAINER_ID = 1
-const STATUS_CONTAINER_NAME = 'okou-status'
-
-/** Text sent to the lens is trimmed to what a glance can actually absorb. */
-const MAX_LINES = 4
-const MAX_LINE_LENGTH = 40
 
 /**
  * `detecting` is a real state, not a placeholder: the Even App injects its host
@@ -96,92 +79,6 @@ export function connectBridge(timeoutMs = 15000): Promise<EvenAppBridge | null> 
   return bridgePromise
 }
 
-function clampText(text: string): string {
-  return text
-    .split('\n')
-    .slice(0, MAX_LINES)
-    .map((line) => (line.length > MAX_LINE_LENGTH ? `${line.slice(0, MAX_LINE_LENGTH - 1)}…` : line))
-    .join('\n')
-}
-
-/**
- * Create the single status text container the auth probe draws into.
- *
- * Safe to call repeatedly: the Even App rejects a duplicate startup page, which
- * is reported as a failure rather than thrown.
- */
-export async function createStatusPage(bridge: EvenAppBridge, content: string): Promise<boolean> {
-  const result = await bridge.createStartUpPageContainer(
-    new CreateStartUpPageContainer({
-      containerTotalNum: 1,
-      textObject: [
-        new TextContainerProperty({
-          xPosition: 0,
-          yPosition: 0,
-          width: LENS_WIDTH,
-          height: LENS_HEIGHT,
-          containerID: STATUS_CONTAINER_ID,
-          containerName: STATUS_CONTAINER_NAME,
-          zOrderIndex: 1,
-          paddingLength: 4,
-          borderWidth: 0,
-          content: clampText(content),
-          // Required to receive temple taps on this container.
-          isEventCapture: 1,
-        }),
-      ],
-    }),
-  )
-
-  return result === StartUpPageCreateResult.success
-}
-
-/** Replace the status text already shown on the lens. */
-export async function updateStatusText(bridge: EvenAppBridge, content: string): Promise<boolean> {
-  return bridge.textContainerUpgrade(
-    new TextContainerUpgrade({
-      containerID: STATUS_CONTAINER_ID,
-      containerName: STATUS_CONTAINER_NAME,
-      content: clampText(content),
-    }),
-  )
-}
-
-/**
- * Temple / ring input on the status container.
- *
- * Double-tap must exit through `shutDownPageContainer(1)` so the system shows
- * its exit confirmation — a root page that exits silently is rejected in Even's
- * review, and without it there is no way off the app on the glasses.
- */
-export function onStatusPageInput(
-  bridge: EvenAppBridge,
-  handlers: { onTap: () => void; onDoubleTap: () => void },
-): () => void {
-  return bridge.onEvenHubEvent((event: EvenHubEvent) => {
-    const textEvent = event.textEvent
-    if (!textEvent || textEvent.containerID !== STATUS_CONTAINER_ID) return
-
-    switch (textEvent.eventType) {
-      // The SDK normalizes a zero event type to undefined in some hosts, and
-      // zero is CLICK_EVENT.
-      case OsEventTypeList.CLICK_EVENT:
-      case undefined:
-        handlers.onTap()
-        break
-      case OsEventTypeList.DOUBLE_CLICK_EVENT:
-        handlers.onDoubleTap()
-        break
-      default:
-        break
-    }
-  })
-}
-
-/** Exit mode 1 raises the system exit-confirmation dialog. */
-export function exitApp(bridge: EvenAppBridge): Promise<boolean> {
-  return bridge.shutDownPageContainer(1)
-}
 
 export function onDeviceStatus(
   bridge: EvenAppBridge,

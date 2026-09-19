@@ -19,7 +19,42 @@ Streaming output is deliberately not handled. Partial assistant text travels on
 a separate `run-output` channel; this client only stores committed rows, so a
 turn appears once it is durable.
 
-Sending messages from the glasses is not implemented yet.
+You can also talk back: the compose screen records from the glasses mic and
+sends the transcript, creating the thread optimistically.
+
+## On the glasses
+
+```
+threads ──click item──▶ messages ──click──▶ compose ──send──▶ messages
+   ▲                        │                   │
+   └──── 2x-tap ────────────┴─── 2x-tap ────────┘
+```
+
+| Screen | Shows | Tap | Double-tap |
+| --- | --- | --- | --- |
+| Threads | Chat list, `+ New chat` first | Open / start new | Exit the app |
+| Messages | Last 4 messages, thinking indicator | Reply by voice | Back to threads |
+| Compose | Recording state and transcript | Start, then stop and send | Cancel |
+
+`threads` is the root page, so its double-tap goes through
+`shutDownPageContainer(1)` and the system exit confirmation, as Even requires.
+
+Markdown is stripped before anything reaches the lens: there is one font and no
+styling, so the markers would only cost characters.
+
+### Two constraints worth knowing
+
+**There is no ASR in the Even SDK.** `audioControl` streams raw PCM from the
+four-mic array (16 kHz, signed 16-bit LE, mono) and nothing more. The app wraps
+that PCM in a WAV header and posts it to Okou's own
+`POST /api/voice-io/stt`, which already carries this user's Clerk auth and
+audio quota — so no provider key ever reaches the device.
+
+**There is no text alignment.** The SDK exposes no alignment and no font
+metrics, so a user message cannot truly be right-aligned. What it does expose
+is per-container geometry, so user rows are drawn in a container inset from the
+left and assistant rows in one flush left. It reads as two columns; it is not
+exact alignment, and the platform offers nothing closer.
 
 ## Architecture
 
@@ -60,8 +95,9 @@ with **no key enumeration, no delete, and no documented size limit**. So:
 - Removal writes a tombstone; the key stays allocated but reads as absent.
 - The namespace keeps its own thread index, since nothing can list keys.
 
-Bounds live in `src/config.ts`: 200 threads listed, messages kept for the 20
-most recently active, 200 rows each.
+Bounds live in `src/config.ts`: 200 threads listed, messages kept for the 100
+most recently active, 200 rows each. Threads sync 4 at a time, because at this
+size a serial cold start would be hundreds of sequential round trips.
 
 ### Chat event snapshot archive
 
@@ -166,8 +202,10 @@ by URL keeps the origin stable and is the supported path until that is tested.
 npm test
 ```
 
-Covers the storage layer's chunking, tombstone and torn-write behaviour, and
-the thread sync state machine including cursor expiry and pagination.
+Covers the storage layer's chunking, tombstone and torn-write behaviour, the
+thread sync state machine including cursor expiry and pagination, the Markdown
+stripper, the message projection and thinking indicator, and the optimistic
+send's id contract.
 
 ## Acceptance checklist
 
@@ -183,3 +221,9 @@ the thread sync state machine including cursor expiry and pagination.
 - [ ] The list survives force-quitting and reopening the Even App
 - [ ] The list survives an Android background suspend, and the Ably connection
       recovers on resume
+- [ ] Thread list scrolls and selects on the glasses
+- [ ] Messages screen updates while a run is working, and the thinking
+      indicator clears when it finishes
+- [ ] Voice capture transcribes and sends; the message appears before the
+      server confirms
+- [ ] A failed send rolls the optimistic message back instead of leaving it
