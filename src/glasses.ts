@@ -9,12 +9,14 @@
 import {
   CreateStartUpPageContainer,
   DeviceConnectType,
+  OsEventTypeList,
   StartUpPageCreateResult,
   TextContainerProperty,
   TextContainerUpgrade,
   waitForEvenAppBridge,
   type DeviceStatus,
   type EvenAppBridge,
+  type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
 
 /** Logical drawing surface of one G2 lens, in container coordinates. */
@@ -26,11 +28,17 @@ const STATUS_CONTAINER_NAME = 'okou-status'
 
 /** Text sent to the lens is trimmed to what a glance can actually absorb. */
 const MAX_LINES = 4
-const MAX_LINE_LENGTH = 48
+const MAX_LINE_LENGTH = 40
+
+/**
+ * `detecting` is a real state, not a placeholder: the Even App injects its host
+ * handler some time after the page loads, so an early read cannot tell "no
+ * glasses" apart from "not injected yet".
+ */
+export type BridgePhase = 'detecting' | 'unavailable' | 'ready'
 
 export interface GlassesState {
-  /** Whether the Even App bridge answered. False in a plain browser. */
-  available: boolean
+  phase: BridgePhase
   /** Whether the startup page container has been created. */
   pageReady: boolean
   connectType: DeviceConnectType
@@ -40,7 +48,7 @@ export interface GlassesState {
 }
 
 export const initialGlassesState: GlassesState = {
-  available: false,
+  phase: 'detecting',
   pageReady: false,
   connectType: DeviceConnectType.None,
 }
@@ -73,7 +81,7 @@ async function waitForEvenAppHost(timeoutMs: number): Promise<boolean> {
 /**
  * Resolve the bridge, or null when this page is not hosted by the Even App.
  */
-export function connectBridge(timeoutMs = 3000): Promise<EvenAppBridge | null> {
+export function connectBridge(timeoutMs = 15000): Promise<EvenAppBridge | null> {
   if (!bridgePromise) {
     bridgePromise = (async () => {
       if (typeof window === 'undefined') return null
@@ -115,7 +123,10 @@ export async function createStatusPage(bridge: EvenAppBridge, content: string): 
           containerID: STATUS_CONTAINER_ID,
           containerName: STATUS_CONTAINER_NAME,
           zOrderIndex: 1,
+          paddingLength: 4,
+          borderWidth: 0,
           content: clampText(content),
+          // Required to receive temple taps on this container.
           isEventCapture: 1,
         }),
       ],
@@ -136,6 +147,42 @@ export async function updateStatusText(bridge: EvenAppBridge, content: string): 
   )
 }
 
+/**
+ * Temple / ring input on the status container.
+ *
+ * Double-tap must exit through `shutDownPageContainer(1)` so the system shows
+ * its exit confirmation — a root page that exits silently is rejected in Even's
+ * review, and without it there is no way off the app on the glasses.
+ */
+export function onStatusPageInput(
+  bridge: EvenAppBridge,
+  handlers: { onTap: () => void; onDoubleTap: () => void },
+): () => void {
+  return bridge.onEvenHubEvent((event: EvenHubEvent) => {
+    const textEvent = event.textEvent
+    if (!textEvent || textEvent.containerID !== STATUS_CONTAINER_ID) return
+
+    switch (textEvent.eventType) {
+      // The SDK normalizes a zero event type to undefined in some hosts, and
+      // zero is CLICK_EVENT.
+      case OsEventTypeList.CLICK_EVENT:
+      case undefined:
+        handlers.onTap()
+        break
+      case OsEventTypeList.DOUBLE_CLICK_EVENT:
+        handlers.onDoubleTap()
+        break
+      default:
+        break
+    }
+  })
+}
+
+/** Exit mode 1 raises the system exit-confirmation dialog. */
+export function exitApp(bridge: EvenAppBridge): Promise<boolean> {
+  return bridge.shutDownPageContainer(1)
+}
+
 export function onDeviceStatus(
   bridge: EvenAppBridge,
   callback: (status: DeviceStatus) => void,
@@ -144,7 +191,8 @@ export function onDeviceStatus(
 }
 
 export function describeConnection(state: GlassesState): string {
-  if (!state.available) return 'Not running inside Even App'
+  if (state.phase === 'detecting') return 'Looking for Even App…'
+  if (state.phase === 'unavailable') return 'Not running inside Even App'
   switch (state.connectType) {
     case DeviceConnectType.Connected:
       return state.batteryLevel === undefined

@@ -6,3 +6,4 @@ dist/
 *.ehpk
 .DS_Store
 build/
+deploy-direct.mjs
