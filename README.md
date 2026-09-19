@@ -63,6 +63,22 @@ with **no key enumeration, no delete, and no documented size limit**. So:
 Bounds live in `src/config.ts`: 200 threads listed, messages kept for the 20
 most recently active, 200 rows each.
 
+### Chat event snapshot archive
+
+Message snapshots are presigned R2 objects, not API responses, so they need
+their own CORS grant and their own `app.json` whitelist entry.
+
+The production bucket `vm0-s3-user-storages-prod` allows `https://*.okou.ai`
+for `GET`/`HEAD`, which covers this origin — verified by preflight, and an
+unrelated origin is rejected. The API builds S3 clients with
+`forcePathStyle` off unless `S3_FORCE_PATH_STYLE=true`, so the presigned host
+is virtual-hosted style (`<bucket>.<account>.r2.cloudflarestorage.com`). Both
+that host and the path-style one are whitelisted, because the flag is not
+visible from this repo.
+
+`syncThreadMessages` still falls back to a bounded cold start from
+`sinceSeqId=0` if the archive fetch fails for any reason.
+
 ### Organization
 
 Every Okou chat API resolves its organization from the session token's
