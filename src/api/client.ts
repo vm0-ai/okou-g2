@@ -16,8 +16,9 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code?: string,
+    readonly detail?: string,
   ) {
-    super(`Okou API responded ${status}${code ? ` (${code})` : ''}`)
+    super(detail ?? `Okou API responded ${status}${code ? ` (${code})` : ''}`)
     this.name = 'ApiError'
   }
 }
@@ -40,9 +41,15 @@ export interface ApiResponse<T> {
   readonly body: T
 }
 
-function errorCode(body: unknown): string | undefined {
-  const error = (body as { error?: { code?: unknown } } | null)?.error
-  return typeof error?.code === 'string' ? error.code : undefined
+function errorDetails(body: unknown): { code?: string; message?: string } {
+  const error = (body as { error?: unknown } | null)?.error
+  if (typeof error === 'string') return { message: error }
+  if (!error || typeof error !== 'object') return {}
+  const { code, message } = error as { code?: unknown; message?: unknown }
+  return {
+    ...(typeof code === 'string' ? { code } : {}),
+    ...(typeof message === 'string' ? { message } : {}),
+  }
 }
 
 export class OkouApiClient {
@@ -76,6 +83,7 @@ export class OkouApiClient {
     if (response.ok || request.expect?.includes(response.status)) {
       return { status: response.status, body }
     }
-    throw new ApiError(response.status, errorCode(body))
+    const error = errorDetails(body)
+    throw new ApiError(response.status, error.code, error.message)
   }
 }

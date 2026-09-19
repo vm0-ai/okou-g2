@@ -60,7 +60,9 @@ export function useChatSync(orgId: string | null | undefined): ChatSync {
         },
       )
       engineRef.current = engine
-      await engine.start()
+      // The engine exposes the failure in state; keep this background startup
+      // from creating an unhandled rejection. Interactive sends still reject.
+      await engine.start().catch(() => undefined)
     })()
 
     return () => {

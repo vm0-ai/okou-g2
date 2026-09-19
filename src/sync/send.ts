@@ -16,6 +16,7 @@
  */
 import type { OkouApiClient } from '../api/client'
 import type { ChatEventRow, ChatThread } from '../types'
+import type { SendModel } from './model'
 
 /** `crypto.randomUUID` is available in both the WebView and the simulator. */
 function uuid(): string {
@@ -26,6 +27,8 @@ export interface SendTarget {
   readonly agentId: string
   /** Omitted for a new thread. */
   readonly threadId?: string
+  /** Required for a new thread; replies retain the thread's saved model. */
+  readonly selection?: SendModel
 }
 
 export interface OptimisticSend {
@@ -43,6 +46,7 @@ export interface OptimisticSend {
  */
 export function prepareSend(target: SendTarget, prompt: string): OptimisticSend {
   const isNewThread = target.threadId === undefined
+  if (isNewThread && !target.selection) throw new Error('A model selection is required')
   const threadId = target.threadId ?? uuid()
   const clientEventId = uuid()
   const now = new Date().toISOString()
@@ -58,6 +62,7 @@ export function prepareSend(target: SendTarget, prompt: string): OptimisticSend 
     userMessage,
     hasTextContent: true,
     clientEventId,
+    ...(isNewThread ? target.selection : {}),
     ...(isNewThread
       ? {
           clientThreadId: threadId,
@@ -78,6 +83,7 @@ export function prepareSend(target: SendTarget, prompt: string): OptimisticSend 
         createdAt: now,
         updatedAt: now,
         pinnedAt: null,
+        selectedModel: target.selection!.model,
       }
     : null
 

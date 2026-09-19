@@ -21,7 +21,7 @@ export const CHAT_EVENT_SCHEMA_VERSION_HEADER = 'X-Chat-Event-Schema-Version'
 export const STORE_VERSION = 1
 
 /** Thread list rows kept on device, newest `sortAt` first. */
-export const MAX_THREADS_PERSISTED = 200
+export const MAX_THREADS_PERSISTED = 100
 
 /** Threads whose messages are synced and kept. Others stay list-only. */
 export const MAX_SYNCED_THREADS = 100

@@ -14,6 +14,7 @@
 import { ApiError, OkouApiClient, type TokenProvider } from '../api/client'
 import { SYNC_CONCURRENCY } from '../config'
 import { prepareSend, sendChatEvent } from './send'
+import { resolveSendModel } from './model'
 import {
   ChatStore,
   selectSyncedThreads,
@@ -58,18 +59,25 @@ async function withConcurrency(
   limit: number,
 ): Promise<void> {
   let next = 0
+  const failures: unknown[] = []
   const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
     while (next < tasks.length) {
       const task = tasks[next]
       next += 1
-      await task?.()
+      try {
+        await task?.()
+      } catch (error) {
+        failures.push(error)
+      }
     }
   })
   await Promise.all(workers)
+  if (failures.length > 0) throw failures[0]
 }
 
 function describeError(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.detail) return error.detail
     if (error.status === 401) return 'Session expired'
     if (error.status === 403) return 'No access to this organization'
     if (error.status === 409) return 'Server chat-event schema mismatch'
@@ -86,6 +94,8 @@ export class SyncEngine {
   private realtime: RealtimeConnection | null = null
   /** Serializes every store mutation; see the class comment. */
   private queue: Promise<void> = Promise.resolve()
+  private allSync: Promise<void> | null = null
+  private resyncRequested = false
   private state: SyncState = initialSyncState
   private closed = false
 
@@ -105,17 +115,21 @@ export class SyncEngine {
   }
 
   /** Run `task` after any in-flight work, swallowing nothing. */
-  private enqueue(task: () => Promise<void>): Promise<void> {
-    this.queue = this.queue.then(async () => {
-      if (this.closed) return
-      try {
-        await task()
-      } catch (error) {
-        if (this.controller.signal.aborted) return
-        this.patch({ error: describeError(error), syncing: false })
-      }
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(async () => {
+      this.controller.signal.throwIfAborted()
+      return task()
     })
-    return this.queue
+    // Keep the queue usable after a failure, but return the original operation
+    // to the caller. A rejected send must never look like a successful send.
+    this.queue = result.then(
+      () => undefined,
+      (error: unknown) => {
+        if (this.closed) return
+        this.patch({ error: describeError(error) })
+      },
+    )
+    return result
   }
 
   async start(): Promise<void> {
@@ -138,7 +152,9 @@ export class SyncEngine {
           void this.syncAll()
           return
         }
-        void this.enqueue(() => this.syncOneThread(signal.threadId))
+        if (this.state.threads.some((thread) => thread.id === signal.threadId)) {
+          void this.enqueue(() => this.syncOneThread(signal.threadId))
+        }
       },
     })
 
@@ -154,25 +170,57 @@ export class SyncEngine {
   }
 
   syncAll(): Promise<void> {
-    return this.enqueue(async () => {
-      this.patch({ syncing: true, error: null })
-      const signal = this.controller.signal
+    if (this.allSync) {
+      this.resyncRequested = true
+      return this.allSync
+    }
+    this.resyncRequested = false
+    const run = async () => {
+      const synced = await this.enqueue(async () => {
+        this.patch({ syncing: true, error: null })
+        const cached = await this.store.readThreadList()
+        const next: ThreadListState = await syncThreadList(this.client, cached, this.controller.signal)
+        await this.store.writeThreadList(next)
+        const persisted = await this.store.readThreadList()
+        this.patch({ threads: persisted.threads })
+        const ids = selectSyncedThreads(persisted.threads)
+        await this.store.evictMessages(ids)
+        return ids
+      })
 
-      const cached = await this.store.readThreadList()
-      const next: ThreadListState = await syncThreadList(this.client, cached, signal)
-      await this.store.writeThreadList(next)
-      this.patch({ threads: next.threads })
-
-      const synced = selectSyncedThreads(next.threads)
-      await this.store.evictMessages(synced)
-      await withConcurrency(
-        synced.map((threadId) => () => this.syncOneThread(threadId)),
-        SYNC_CONCURRENCY,
-      )
-
-      await this.loadCachedCounts()
-      this.patch({ syncing: false, lastSyncedAt: Date.now() })
+      const failures: unknown[] = []
+      // Yield the mutation queue after each small batch. Opening a chat or
+      // sending a message can then run without waiting for all 100 histories.
+      for (let offset = 0; offset < synced.length; offset += SYNC_CONCURRENCY) {
+        try {
+          await this.enqueue(() => withConcurrency(
+            synced.slice(offset, offset + SYNC_CONCURRENCY).map((id) => () => this.syncOneThread(id)),
+            SYNC_CONCURRENCY,
+          ))
+        } catch (error) {
+          this.controller.signal.throwIfAborted()
+          failures.push(error)
+        }
+      }
+      await this.enqueue(() => this.loadCachedCounts())
+      if (failures.length > 0) throw failures[0]
+      this.patch({ syncing: false, lastSyncedAt: Date.now(), error: null })
+    }
+    const result = run().catch((error: unknown) => {
+      if (!this.closed) this.patch({ syncing: false, error: describeError(error) })
+      throw error
     })
+    this.allSync = result
+    // Both branches own the background promise; interactive callers can still
+    // await the original rejection and display a retry affordance.
+    const settled = () => {
+      this.allSync = null
+      // A thread-list push arriving after the list read must not get lost
+      // while this pass is still downloading message histories.
+      if (this.resyncRequested && !this.closed) void this.syncAll()
+    }
+    void result.then(settled, settled)
+    return result
   }
 
   private async syncOneThread(threadId: string): Promise<void> {
@@ -183,9 +231,9 @@ export class SyncEngine {
       if (next.rows.length === cached.rows.length && next.cursor.lastEventId === cached.cursor.lastEventId) {
         return
       }
-      await this.store.writeMessages(threadId, next)
+      const count = await this.store.writeMessages(threadId, next)
       this.patch({
-        messageCounts: { ...this.state.messageCounts, [threadId]: next.rows.length },
+        messageCounts: { ...this.state.messageCounts, [threadId]: count },
       })
     } catch (error) {
       if (error instanceof ThreadGoneError) {
@@ -203,6 +251,11 @@ export class SyncEngine {
   /** Persisted rows for one thread, for rendering. */
   readMessages(threadId: string): Promise<readonly ChatEventRow[]> {
     return this.store.readMessages(threadId).then((messages) => messages.rows)
+  }
+
+  /** Opening a conversation must also fetch rows missing from its local cache. */
+  syncMessages(threadId: string): Promise<void> {
+    return this.enqueue(() => this.syncOneThread(threadId))
   }
 
   /**
@@ -232,22 +285,32 @@ export class SyncEngine {
    * failure rolls the optimistic rows back rather than leaving a message that
    * looks sent.
    */
-  send(prompt: string, threadId?: string): Promise<string> {
-    let sentThreadId = ''
+  send(
+    prompt: string,
+    threadId?: string,
+    onOptimistic?: (threadId: string) => void,
+  ): Promise<string> {
     return this.enqueue(async () => {
       const signal = this.controller.signal
-      const agentId = await this.resolveAgentId(signal)
+      this.patch({ error: null })
+      const cachedThreads = await this.store.readThreadList()
+      const existingThread = threadId === undefined
+        ? undefined
+        : cachedThreads.threads.find((thread) => thread.id === threadId)
+      if (threadId !== undefined && !existingThread) {
+        throw new Error('This chat is no longer available. Sync the chat list again.')
+      }
+      const agentId = existingThread?.agentId ?? await this.resolveAgentId(signal)
+      const selection = threadId === undefined ? await resolveSendModel(this.client, signal) : undefined
       const optimistic = prepareSend(
-        threadId === undefined ? { agentId } : { agentId, threadId },
+        threadId === undefined ? { agentId, selection } : { agentId, threadId },
         prompt,
       )
-      sentThreadId = optimistic.threadId
 
       const cachedMessages = await this.store.readMessages(optimistic.threadId)
-      const cachedThreads = await this.store.readThreadList()
 
       // Show it first.
-      await this.store.writeMessages(optimistic.threadId, {
+      const count = await this.store.writeMessages(optimistic.threadId, {
         cursor: cachedMessages.cursor,
         rows: [...cachedMessages.rows, optimistic.row],
       })
@@ -256,17 +319,20 @@ export class SyncEngine {
           ...cachedThreads,
           threads: [optimistic.thread, ...cachedThreads.threads],
         })
-        this.patch({ threads: [optimistic.thread, ...this.state.threads] })
+        this.patch({ threads: (await this.store.readThreadList()).threads })
       }
       this.patch({
         messageCounts: {
           ...this.state.messageCounts,
-          [optimistic.threadId]: cachedMessages.rows.length + 1,
+          [optimistic.threadId]: count,
         },
       })
+      onOptimistic?.(optimistic.threadId)
 
+      let runId: string | null
       try {
-        await sendChatEvent(this.client, optimistic, signal)
+        const result = await sendChatEvent(this.client, optimistic, signal)
+        runId = result.runId
       } catch (error) {
         // Roll back to exactly what was stored before the attempt.
         await this.store.writeMessages(optimistic.threadId, cachedMessages)
@@ -274,11 +340,32 @@ export class SyncEngine {
           await this.store.writeThreadList(cachedThreads)
           this.patch({ threads: cachedThreads.threads })
         }
+        this.patch({
+          messageCounts: {
+            ...this.state.messageCounts,
+            [optimistic.threadId]: cachedMessages.rows.length,
+          },
+        })
         throw error
       }
 
-      await this.syncOneThread(optimistic.threadId)
-    }).then(() => sentThreadId)
+      // A confirmed send stays successful if the subsequent history read is
+      // temporarily unavailable. The durable optimistic row remains visible.
+      void this.enqueue(async () => {
+        if (runId) {
+          const latest = await this.store.readMessages(optimistic.threadId)
+          await this.store.writeMessages(optimistic.threadId, {
+            ...latest,
+            rows: latest.rows.map((row) => row.id === optimistic.row.id && row.runId === null
+              ? { ...row, runId }
+              : row),
+          })
+          this.patch({ messageCounts: { ...this.state.messageCounts } })
+        }
+        await this.syncOneThread(optimistic.threadId)
+      })
+      return optimistic.threadId
+    })
   }
 
   async close(options: { readonly clearStorage?: boolean } = {}): Promise<void> {

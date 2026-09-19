@@ -41,7 +41,7 @@ const ROW_CHARS = 44
 
 export const NEW_THREAD_ITEM = '+ New chat'
 
-function statusContainer(text: string): TextContainerProperty {
+function statusContainer(text: string, isEventCapture = 1, zOrderIndex = 1): TextContainerProperty {
   return new TextContainerProperty({
     xPosition: 0,
     yPosition: LENS_HEIGHT - STATUS_HEIGHT,
@@ -49,10 +49,10 @@ function statusContainer(text: string): TextContainerProperty {
     height: STATUS_HEIGHT,
     containerID: STATUS_CONTAINER_ID,
     containerName: STATUS_CONTAINER_NAME,
-    zOrderIndex: 1,
+    zOrderIndex,
     paddingLength: 4,
     content: truncate(text, ROW_CHARS + 12),
-    isEventCapture: 1,
+    isEventCapture,
   })
 }
 
@@ -79,16 +79,17 @@ function messageContainers(
 }
 
 /** Screen 1: the thread list, with "new chat" as the first item. */
-export function threadListPage(titles: readonly string[]): RebuildPageContainer {
+export function threadListPage(titles: readonly string[], status?: string | null): RebuildPageContainer {
   const items = [NEW_THREAD_ITEM, ...titles].map((title) => truncate(title, ROW_CHARS))
   return new RebuildPageContainer({
-    containerTotalNum: 1,
+    containerTotalNum: status ? 2 : 1,
+    ...(status ? { textObject: [statusContainer(status, 0, 2)] } : {}),
     listObject: [
       new ListContainerProperty({
         xPosition: 0,
         yPosition: 0,
         width: LENS_WIDTH,
-        height: LENS_HEIGHT,
+        height: status ? LENS_HEIGHT - STATUS_HEIGHT : LENS_HEIGHT,
         containerID: THREADS_CONTAINER_ID,
         containerName: THREADS_CONTAINER_NAME,
         zOrderIndex: 1,

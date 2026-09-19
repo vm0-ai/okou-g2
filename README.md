@@ -95,9 +95,24 @@ with **no key enumeration, no delete, and no documented size limit**. So:
 - Removal writes a tombstone; the key stays allocated but reads as absent.
 - The namespace keeps its own thread index, since nothing can list keys.
 
-Bounds live in `src/config.ts`: 200 threads listed, messages kept for the 100
-most recently active, 200 rows each. Threads sync 4 at a time, because at this
+Bounds live in `src/config.ts`: 100 threads listed, messages kept for the 100
+most recently active, 200 message/lifecycle rows each. Thinking and usage rows
+still advance the server cursor but cannot evict readable history. Old message
+caches are rebuilt once to recover text they may already have dropped.
+Threads sync 4 at a time, because at this
 size a serial cold start would be hundreds of sequential round trips.
+
+Opening a conversation also fetches its latest rows. The lens distinguishes
+loading, a failed read (tap to retry), and a confirmed empty history. Native
+display failures are shown in the phone's Glasses card and do not stop later
+redraws.
+
+New sends select the member's default model, falling back to the workspace
+default, using the same preference endpoints as the web app. Replies retain
+the conversation's agent and model. The prompt appears before the send is
+acknowledged; a rejected send rolls it back and keeps the transcript for a tap
+to retry. A later history-read failure cannot turn an accepted send into a
+failed send.
 
 ### Chat event snapshot archive
 

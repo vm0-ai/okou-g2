@@ -32,14 +32,18 @@ export type LensScreen = 'threads' | 'messages' | 'compose'
 export interface ControllerHooks {
   /** Threads to list, newest first. */
   listThreads(): readonly ChatThread[]
+  listStatus?(): string | null
   /** Persisted rows for one thread. */
   readMessages(threadId: string): Promise<readonly ChatEventRow[]>
+  /** Fetch history when a thread is opened, including an uncached thread. */
+  syncMessages(threadId: string): Promise<void>
   /** Transcribe captured audio. Returns null when nothing was recognised. */
   transcribe(audio: Blob): Promise<string | null>
   /** Send a prompt; resolves with the thread it landed in. */
-  send(prompt: string, threadId?: string): Promise<string>
+  send(prompt: string, threadId?: string, onOptimistic?: (threadId: string) => void): Promise<string>
   /** Surface the current screen to the phone UI. */
   onScreen?(screen: LensScreen, threadId: string | null): void
+  onError?(message: string | null): void
 }
 
 type ComposeStage = 'idle' | 'recording' | 'transcribing' | 'sending' | 'failed'
@@ -49,6 +53,12 @@ export class LensController {
   private threadId: string | null = null
   private compose: ComposeStage = 'idle'
   private composeNote = ''
+  private transcript = ''
+  private messageLoading = false
+  private messageError: string | null = null
+  private sending = false
+  private operationVersion = 0
+  private historyVersion = 0
   private recorder: Recorder | null = null
   private unsubscribe: (() => void) | null = null
   private closed = false
@@ -72,6 +82,7 @@ export class LensController {
 
   close(): void {
     this.closed = true
+    this.operationVersion += 1
     this.unsubscribe?.()
     this.unsubscribe = null
     void this.recorder?.cancel()
@@ -119,6 +130,7 @@ export class LensController {
   }
 
   private async onDoubleClick(): Promise<void> {
+    this.operationVersion += 1
     switch (this.screen) {
       case 'threads':
         // Root page: mode 1 raises the system exit confirmation.
@@ -133,6 +145,7 @@ export class LensController {
         this.recorder = null
         this.compose = 'idle'
         this.composeNote = ''
+        this.transcript = ''
         // Back to the thread it was started from, or the list for a new chat.
         this.setScreen(this.threadId ? 'messages' : 'threads', this.threadId)
         await this.render()
@@ -141,8 +154,16 @@ export class LensController {
 
   private async onClick(): Promise<void> {
     if (this.screen === 'messages') {
+      if (this.sending) return
+      if (this.messageError && this.threadId) {
+        await this.openThread(this.threadId)
+        return
+      }
       // A tap in a thread starts a new message in that same thread.
       this.setScreen('compose', this.threadId)
+      this.compose = 'idle'
+      this.composeNote = ''
+      this.transcript = ''
       await this.render()
       return
     }
@@ -157,17 +178,40 @@ export class LensController {
       this.setScreen('compose', null)
       this.compose = 'idle'
       this.composeNote = ''
+      this.transcript = ''
       await this.render()
       return
     }
     const thread = this.hooks.listThreads()[index - 1]
     if (!thread) return
-    this.setScreen('messages', thread.id)
+    await this.openThread(thread.id)
+  }
+
+  private async openThread(threadId: string): Promise<void> {
+    const version = ++this.historyVersion
+    this.messageLoading = true
+    this.messageError = null
+    this.hooks.onError?.(null)
+    this.setScreen('messages', threadId)
+    await this.render()
+    try {
+      await this.hooks.syncMessages(threadId)
+    } catch (error) {
+      if (this.closed || version !== this.historyVersion || this.threadId !== threadId) return
+      this.messageError = error instanceof Error ? error.message : 'Could not load messages'
+      this.hooks.onError?.(this.messageError)
+    }
+    if (this.closed || version !== this.historyVersion || this.threadId !== threadId) return
+    this.messageLoading = false
     await this.render()
   }
 
   private async toggleRecording(): Promise<void> {
     if (this.compose === 'transcribing' || this.compose === 'sending') return
+    if (this.compose === 'failed' && this.transcript) {
+      await this.sendTranscript(this.transcript)
+      return
+    }
 
     if (this.compose !== 'recording') {
       try {
@@ -183,6 +227,7 @@ export class LensController {
     }
 
     const recorder = this.recorder
+    const version = this.operationVersion
     this.recorder = null
     this.compose = 'transcribing'
     await this.render()
@@ -196,6 +241,7 @@ export class LensController {
         return
       }
       const transcript = await this.hooks.transcribe(audio)
+      if (this.closed || version !== this.operationVersion) return
       if (!transcript) {
         this.compose = 'failed'
         this.composeNote = 'Could not hear that'
@@ -203,19 +249,48 @@ export class LensController {
         return
       }
 
-      this.compose = 'sending'
-      this.composeNote = transcript
-      await this.render()
-
-      const threadId = await this.hooks.send(transcript, this.threadId ?? undefined)
-      this.compose = 'idle'
-      this.composeNote = ''
-      this.setScreen('messages', threadId)
+      await this.sendTranscript(transcript)
     } catch (error) {
+      if (this.closed || version !== this.operationVersion) return
       this.compose = 'failed'
       this.composeNote = error instanceof Error ? error.message : 'Send failed'
+      this.hooks.onError?.(this.composeNote)
     }
     await this.render()
+  }
+
+  private async sendTranscript(transcript: string): Promise<void> {
+    const version = this.operationVersion
+    const target = this.threadId
+    this.transcript = transcript
+    this.compose = 'sending'
+    this.composeNote = transcript
+    this.sending = true
+    this.hooks.onError?.(null)
+    await this.render()
+    try {
+      const threadId = await this.hooks.send(transcript, target ?? undefined, (id) => {
+        if (this.closed || version !== this.operationVersion) return
+        this.messageLoading = false
+        this.messageError = null
+        this.setScreen('messages', id)
+        void this.render()
+      })
+      if (this.closed || version !== this.operationVersion) return
+      this.compose = 'idle'
+      this.composeNote = ''
+      this.transcript = ''
+      this.setScreen('messages', threadId)
+    } catch (error) {
+      if (this.closed || version !== this.operationVersion) return
+      this.compose = 'failed'
+      this.composeNote = error instanceof Error ? error.message : 'Send failed'
+      this.setScreen('compose', target)
+      this.hooks.onError?.(this.composeNote)
+    } finally {
+      this.sending = false
+    }
+    if (!this.closed && version === this.operationVersion) await this.render()
   }
 
   private composeLines(): readonly string[] {
@@ -227,7 +302,7 @@ export class LensController {
       case 'sending':
         return ['Sending...', this.composeNote]
       case 'failed':
-        return [this.composeNote, 'Tap to try again']
+        return [this.composeNote, this.transcript ? 'Tap to retry sending' : 'Tap to try again']
       default:
         return [this.threadId ? 'Reply by voice' : 'New chat', 'Tap to speak']
     }
@@ -240,29 +315,37 @@ export class LensController {
     if (!this.threadId) return { messages: [], status: '' }
     const rows = await this.hooks.readMessages(this.threadId)
     const messages = toLensMessages(rows)
-    const status = isRunInProgress(rows)
-      ? 'Thinking...'
-      : messages.length === 0
-        ? 'No messages yet · tap to speak'
-        : 'Tap to reply · 2x-tap back'
+    let status = messages.length === 0 ? 'No messages yet · tap to speak' : 'Tap to reply · 2x-tap back'
+    if (isRunInProgress(rows)) status = 'Thinking...'
+    if (this.sending) status = 'Sending...'
+    if (this.messageLoading) status = 'Loading messages...'
+    if (this.messageError) status = 'Could not load messages · tap to retry'
     return { messages, status }
   }
 
   /** Serialized so two triggers cannot rebuild the page concurrently. */
   private render(): Promise<void> {
-    this.rendering = this.rendering.then(async () => {
+    const operation = this.rendering.then(async () => {
       if (this.closed) return
+      let page
       if (this.screen === 'threads') {
         const titles = this.hooks.listThreads().map((thread) => thread.title ?? 'Untitled')
-        await this.bridge.rebuildPageContainer(threadListPage(titles))
-        return
+        page = threadListPage(titles, this.hooks.listStatus?.())
+      } else if (this.screen === 'compose') {
+        page = composePage(this.composeLines())
+      } else {
+        const threadId = this.threadId
+        const { messages, status } = await this.messageState()
+        if (this.closed || this.screen !== 'messages' || this.threadId !== threadId) return
+        page = messagesPage(messages, status)
       }
-      if (this.screen === 'compose') {
-        await this.bridge.rebuildPageContainer(composePage(this.composeLines()))
-        return
-      }
-      const { messages, status } = await this.messageState()
-      await this.bridge.rebuildPageContainer(messagesPage(messages, status))
+      const ok = await this.bridge.rebuildPageContainer(page)
+      if (!ok) throw new Error('The glasses could not display this page')
+    })
+    // One failed storage read or native rebuild must not poison every future
+    // render, including returning to the list or retrying a send.
+    this.rendering = operation.catch((error: unknown) => {
+      this.hooks.onError?.(error instanceof Error ? error.message : 'Display failed')
     })
     return this.rendering
   }

@@ -101,9 +101,18 @@ describe('toLensMessages', () => {
   it('ignores events that carry no readable text', () => {
     expect(toLensMessages([row({ id: 'u', seqId: 1, eventType: 'usage.recorded' })])).toEqual([])
   })
+
+  it('shows the error for a failed run instead of leaving an empty conversation', () => {
+    const messages = toLensMessages([row({ id: 'failed', seqId: 1, eventType: 'run.failed', runId: 'run-1', payload: { error: 'Model is unavailable' } })])
+    expect(messages[0]).toMatchObject({ role: 'assistant', text: 'Model is unavailable' })
+  })
 })
 
 describe('isRunInProgress', () => {
+  it('shows thinking for a direct send that has a run but never entered the queue', () => {
+    expect(isRunInProgress([row({ id: 'input', seqId: 1, runId: 'run-1', eventType: 'input.prompt' })])).toBe(true)
+  })
+
   it('is true while a run has started but not finished', () => {
     expect(
       isRunInProgress([row({ id: 'q', seqId: 1, runId: 'run-1', eventType: 'run.queued' })]),
@@ -142,7 +151,7 @@ describe('isRunInProgress', () => {
 
 describe('prepareSend', () => {
   it('uses one client thread id in both the request and the optimistic rows', () => {
-    const send = prepareSend({ agentId: 'agent-1' }, 'Hello there')
+    const send = prepareSend({ agentId: 'agent-1', selection: { model: 'gpt-6-astra' } }, 'Hello there')
 
     expect(send.body.clientThreadId).toBe(send.threadId)
     expect(send.thread?.id).toBe(send.threadId)
@@ -162,7 +171,7 @@ describe('prepareSend', () => {
   })
 
   it('carries the prompt as a text part the API accepts', () => {
-    const send = prepareSend({ agentId: 'agent-1' }, 'Ship it')
+    const send = prepareSend({ agentId: 'agent-1', selection: { model: 'gpt-6-astra' } }, 'Ship it')
 
     expect(send.body.userMessage).toEqual({
       version: 1,

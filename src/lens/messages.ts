@@ -18,11 +18,11 @@ export interface LensMessage {
 }
 
 /** Event types that carry text a person actually wants to read. */
-const USER_TYPES = new Set(['input.prompt', 'input.rejected'])
-const ASSISTANT_TYPES = new Set(['output.message', 'output.error'])
+const USER_TYPES = new Set(['input.prompt', 'input.rejected', 'input.automation', 'input.budget', 'input.goal'])
+const ASSISTANT_TYPES = new Set(['output.message', 'output.error', 'run.failed', 'run.cancelled'])
 
 /** A run is working between these and its terminal event. */
-const RUN_STARTED = new Set(['run.queued', 'run.dequeued'])
+const RUN_STARTED = new Set(['input.prompt', 'input.automation', 'run.queued', 'run.dequeued', 'output.thinking'])
 const RUN_FINISHED = new Set(['run.completed', 'run.failed', 'run.cancelled'])
 
 /**
@@ -34,6 +34,9 @@ const RUN_FINISHED = new Set(['run.completed', 'run.failed', 'run.cancelled'])
  */
 function rowText(row: ChatEventRow): string | null {
   const payload = row.payload
+  if (row.eventType === 'output.error' || row.eventType === 'run.failed' || row.eventType === 'run.cancelled') {
+    return markdownToPlainText(payload?.error ?? (row.eventType === 'run.cancelled' ? 'Run cancelled' : 'Run failed'))
+  }
   if (!payload) return null
 
   if (typeof payload.content === 'string' && payload.content.length > 0) {
@@ -90,6 +93,7 @@ export function isRunInProgress(rows: readonly ChatEventRow[]): boolean {
 
   for (const row of rows) {
     if (row.runId === null) continue
+    if (!RUN_STARTED.has(row.eventType) && !RUN_FINISHED.has(row.eventType)) continue
     const entry = latestByRun.get(row.runId) ?? {
       started: false,
       finished: false,

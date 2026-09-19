@@ -23,7 +23,7 @@ export interface LensStatus {
  * data.
  */
 export function useLens(engine: SyncEngine | null, sync: SyncState): LensStatus {
-  const { getToken } = useAuth()
+  const { getToken, isSignedIn } = useAuth()
   const [glasses, setGlasses] = useState<GlassesState>(initialGlassesState)
   const [screen, setScreen] = useState<LensScreen>('threads')
   const [threadId, setThreadId] = useState<string | null>(null)
@@ -35,6 +35,16 @@ export function useLens(engine: SyncEngine | null, sync: SyncState): LensStatus 
   engineRef.current = engine
   const threadsRef = useRef(sync.threads)
   threadsRef.current = sync.threads
+  const listStatusRef = useRef<string | null>(null)
+  listStatusRef.current = !isSignedIn
+    ? 'Sign in on your phone'
+    : !engine
+      ? 'Choose an organization on your phone'
+      : sync.error
+        ? 'Chat sync failed · check phone'
+        : sync.syncing
+          ? 'Syncing chats...'
+          : `${sync.threads.length} chats · tap to open`
   const getTokenRef = useRef(getToken)
   getTokenRef.current = getToken
 
@@ -62,17 +72,26 @@ export function useLens(engine: SyncEngine | null, sync: SyncState): LensStatus 
 
       controller = new LensController(bridge, {
         listThreads: () => threadsRef.current,
+        listStatus: () => listStatusRef.current,
         readMessages: (id) => engineRef.current?.readMessages(id) ?? Promise.resolve([]),
-        transcribe: (audio) => transcribeAudio(() => getTokenRef.current(), audio),
-        send: (prompt, id) => {
+        syncMessages: (id) => {
           const active = engineRef.current
           if (!active) throw new Error('Chat sync is not ready')
-          return active.send(prompt, id)
+          return active.syncMessages(id)
+        },
+        transcribe: (audio) => transcribeAudio(() => getTokenRef.current(), audio),
+        send: (prompt, id, onOptimistic) => {
+          const active = engineRef.current
+          if (!active) throw new Error('Chat sync is not ready')
+          return active.send(prompt, id, onOptimistic)
         },
         onScreen: (next, id) => {
           if (disposed) return
           setScreen(next)
           setThreadId(id)
+        },
+        onError: (message) => {
+          if (!disposed) setGlasses((previous) => ({ ...previous, error: message ?? undefined }))
         },
       })
 
@@ -86,6 +105,9 @@ export function useLens(engine: SyncEngine | null, sync: SyncState): LensStatus 
         return
       }
       controllerRef.current = controller
+      // Sync can finish while the startup page is awaiting its native ack.
+      // Replay the latest state after installing the controller ref.
+      controller.refresh()
       setGlasses((previous) => ({ ...previous, pageReady: true }))
     })()
 
@@ -100,7 +122,7 @@ export function useLens(engine: SyncEngine | null, sync: SyncState): LensStatus 
   // Any change to the synced data redraws whichever screen is showing.
   useEffect(() => {
     controllerRef.current?.refresh()
-  }, [sync.threads, sync.messageCounts, sync.syncing])
+  }, [sync.threads, sync.messageCounts, sync.syncing, sync.error, engine, isSignedIn])
 
   return { glasses, screen, threadId }
 }

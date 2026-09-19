@@ -34,6 +34,16 @@ export interface ThreadMessages {
 
 const EMPTY_THREAD_LIST: ThreadListState = { threads: [], seqId: null }
 
+// The old cache retained the last 200 raw events, so a long run's thinking or
+// usage events could evict every readable message. Rebuild old message caches
+// once, preserving the thread list and the user/org namespace.
+const MESSAGE_CACHE_VERSION = 2
+const RETAINED_EVENT_TYPES = new Set([
+  'input.prompt', 'input.rejected', 'input.automation', 'input.budget', 'input.goal',
+  'output.message', 'output.error',
+  'run.queued', 'run.dequeued', 'run.completed', 'run.failed', 'run.cancelled',
+])
+
 export const EMPTY_THREAD_MESSAGES: ThreadMessages = {
   cursor: { lastEventId: null, lastSeqId: THREAD_START_SEQ_ID },
   rows: [],
@@ -61,6 +71,7 @@ function bySortAtDesc(left: ChatThread, right: ChatThread): number {
 
 export class ChatStore {
   private readonly prefix: string
+  private indexQueue: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly kv: KeyValueStore,
@@ -84,7 +95,10 @@ export class ChatStore {
   async readThreadList(): Promise<ThreadListState> {
     const stored = parse<ThreadListState>(await this.kv.read(this.threadListKey()))
     if (!stored || !Array.isArray(stored.threads)) return EMPTY_THREAD_LIST
-    return stored
+    return {
+      ...stored,
+      threads: [...stored.threads].sort(bySortAtDesc).slice(0, MAX_THREADS_PERSISTED),
+    }
   }
 
   async writeThreadList(state: ThreadListState): Promise<void> {
@@ -93,8 +107,8 @@ export class ChatStore {
   }
 
   async readMessages(threadId: string): Promise<ThreadMessages> {
-    const stored = parse<ThreadMessages>(await this.kv.read(this.messagesKey(threadId)))
-    if (!stored || !Array.isArray(stored.rows) || !stored.cursor) {
+    const stored = parse<ThreadMessages & { cacheVersion?: number }>(await this.kv.read(this.messagesKey(threadId)))
+    if (!stored || stored.cacheVersion !== MESSAGE_CACHE_VERSION || !Array.isArray(stored.rows) || !stored.cursor) {
       return EMPTY_THREAD_MESSAGES
     }
     return stored
@@ -103,25 +117,34 @@ export class ChatStore {
   /**
    * Persist a thread's rows and record it in the index.
    *
-   * Only the newest `MAX_ROWS_PER_THREAD` rows are kept. The cursor still
+   * Only the newest `MAX_ROWS_PER_THREAD` display/lifecycle rows are kept. The cursor still
    * advances past dropped rows, so the next sync resumes from the true tail
    * rather than re-fetching trimmed history.
    */
-  async writeMessages(threadId: string, messages: ThreadMessages): Promise<void> {
-    const rows = messages.rows.slice(-MAX_ROWS_PER_THREAD)
-    await this.kv.write(this.messagesKey(threadId), JSON.stringify({ ...messages, rows }))
+  async writeMessages(threadId: string, messages: ThreadMessages): Promise<number> {
+    const rows = messages.rows
+      .filter((row) => RETAINED_EVENT_TYPES.has(row.eventType) || row.revokesEventId !== null)
+      .slice(-MAX_ROWS_PER_THREAD)
+    await this.kv.write(this.messagesKey(threadId), JSON.stringify({
+      ...messages, rows, cacheVersion: MESSAGE_CACHE_VERSION,
+    }))
     await this.addToIndex(threadId)
+    return rows.length
   }
 
   async readIndex(): Promise<readonly string[]> {
     return parse<string[]>(await this.kv.read(this.threadIndexKey())) ?? []
   }
 
-  private async addToIndex(threadId: string): Promise<void> {
-    const index = await this.readIndex()
-    if (index[0] === threadId) return
-    const next = [threadId, ...index.filter((entry) => entry !== threadId)]
-    await this.kv.write(this.threadIndexKey(), JSON.stringify(next))
+  private addToIndex(threadId: string): Promise<void> {
+    const result = this.indexQueue.then(async () => {
+      const index = await this.readIndex()
+      if (index[0] === threadId) return
+      const next = [threadId, ...index.filter((entry) => entry !== threadId)]
+      await this.kv.write(this.threadIndexKey(), JSON.stringify(next))
+    })
+    this.indexQueue = result.catch(() => undefined)
+    return result
   }
 
   /**
