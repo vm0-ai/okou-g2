@@ -95,6 +95,9 @@ export class LensController {
     const list = event.listEvent
     const text = event.textEvent
     const sys = event.sysEvent
+    // Audio frames share this callback but have no gesture payload. Only a
+    // gesture payload may use the missing-eventType fallback for a tap.
+    if (!list && !text && !sys) return
     const type = list?.eventType ?? text?.eventType ?? sys?.eventType
 
     // The SDK normalizes a zero event type to undefined on some hosts, and
