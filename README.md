@@ -77,7 +77,8 @@ Configuration lives in `wrangler.jsonc`:
 | --- | --- |
 | `CLERK_ISSUER` | Clerk production instance issuer (`https://clerk.okou.ai`) |
 | `ALLOWED_ORIGINS` | Accepted `azp` claim values on the session token |
-| `ALLOWED_USER_IDS` | Clerk user IDs allowed past `/api/auth/me`. Empty means any signed-in Okou user. |
+
+Any signed-in Okou account can use the app; there is no per-user allowlist.
 
 The build reads `VITE_CLERK_PUBLISHABLE_KEY` from the environment. It is the
 same public key the `vm0-ai/okou` repository stores as
@@ -106,4 +107,3 @@ by URL keeps the origin stable and is the supported path until that is tested.
 - [ ] Token still refreshes after 5 minutes backgrounded or screen-locked
 - [ ] Session still restores after 24 hours
 - [ ] Signing out invalidates the old token
-- [ ] A different Clerk account receives `403 user_not_allowed`

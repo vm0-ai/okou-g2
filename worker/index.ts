@@ -13,7 +13,6 @@ export interface Env {
   ASSETS: Fetcher
   CLERK_ISSUER: string
   ALLOWED_ORIGINS: string
-  ALLOWED_USER_IDS: string
 }
 
 interface ClerkSessionClaims extends JWTPayload {
@@ -96,11 +95,6 @@ async function authenticate(request: Request, env: Env): Promise<AuthResult> {
 
   const userId = typeof claims.sub === 'string' ? claims.sub : ''
   if (!userId) return { ok: false, status: 401, error: 'missing_subject' }
-
-  const allowedUserIds = splitList(env.ALLOWED_USER_IDS)
-  if (allowedUserIds.length > 0 && !allowedUserIds.includes(userId)) {
-    return { ok: false, status: 403, error: 'user_not_allowed' }
-  }
 
   return { ok: true, claims, userId }
 }
